@@ -323,6 +323,7 @@ class HitlWorkspaceView:
         )
         stage_label = self._stage_label(stage) if stage else ""
         phase_label = self._working_phase_label(phase) if phase else ""
+        owner_request_id = str((owner or {}).get("request_id") or "").strip()
         started_at = str((owner or {}).get("started_at") or "").strip()
         provider = str((owner or {}).get("provider") or "").strip()
         mode = str((owner or {}).get("mode") or "").strip()
@@ -395,7 +396,6 @@ class HitlWorkspaceView:
         github_publication = (
             github_publication if isinstance(github_publication, dict) else {}
         )
-        launch_request_id = str(launch_status.get("request_id", "")).strip()
         launch_updated_at = self._parse_timestamp(
             launch_status.get("updated_at") or launch_status.get("created_at")
         )
@@ -404,11 +404,11 @@ class HitlWorkspaceView:
             and (datetime.now(timezone.utc) - launch_updated_at).total_seconds() < 30
         )
         stop_requested = bool(
-            launch_request_id
-            and hitl_stop_request_path(self.work_dir, launch_request_id).is_file()
+            owner_request_id
+            and hitl_stop_request_path(self.work_dir, owner_request_id).is_file()
         )
 
-        if launch_status:
+        if owner is None and launch_status:
             mode = str(launch_status.get("mode", mode)).strip()
             hitl_mode = str(launch_status.get("hitl_mode", hitl_mode)).strip().lower()
             provider = str(launch_status.get("provider", provider)).strip()
@@ -474,7 +474,7 @@ class HitlWorkspaceView:
                 "Stopping research",
                 "NeuriCo is restoring the latest saved progress.",
                 next_step="The run will stop after recovery finishes.",
-                record=launch_status,
+                record=owner,
                 display_stage="Stopping",
                 display_phase="Restoring progress",
             )

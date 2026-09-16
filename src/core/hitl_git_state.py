@@ -34,8 +34,8 @@ class HitlGitStateError(RuntimeError):
 # The whole HITL state directory rolls back with a failed attempt so a newly
 # created private state file cannot leak into the recovered run. Capture and
 # restore explicitly exclude live locks, SQLite sidecars, temporary files,
-# generated worker command wrappers, and launch-scoped control requests; those
-# belong to the running process rather than the rollback boundary.
+# generated worker command wrappers, launch status, and launch-scoped control
+# requests; those belong to the run lifecycle rather than the rollback boundary.
 DURABLE_HITL_STATE_PATHS = (
     HITL_RELATIVE_ROOT.as_posix(),
     ".neurico/research_state.json",
@@ -240,6 +240,8 @@ class HitlGitStateStore:
                     continue
                 if relative.is_absolute() or ".." in relative.parts:
                     raise HitlGitStateError("Git HITL snapshot contains an unsafe path.")
+                if self._is_ephemeral_hitl_path(relative.as_posix()):
+                    continue
                 destination = (self.work_dir / Path(*relative.parts)).resolve()
                 try:
                     destination.relative_to(self.work_dir)
@@ -281,6 +283,7 @@ class HitlGitStateStore:
         name = suffix[-1]
         return (
             suffix[0] in {"bin", "control"}
+            or suffix == ("launch.json",)
             or name.endswith(".lock")
             or name.endswith(".tmp")
             or name in {"history.sqlite-wal", "history.sqlite-shm", "manager_mcp.json"}

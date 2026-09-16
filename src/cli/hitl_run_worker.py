@@ -184,7 +184,9 @@ def main() -> int:
             assert control is not None
             control.request(requested_by=f"signal:{signal.Signals(signum).name.lower()}")
 
-        signal.signal(signal.SIGTERM, request_signal_stop)
+        # Scheduler termination is process loss, not an explicit NeuriCo stop.
+        # Keep the default action so durable pending work survives for restart.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.signal(signal.SIGINT, request_signal_stop)
         started_at = utc_now()
         continuation = request["mode"] == "continue"
