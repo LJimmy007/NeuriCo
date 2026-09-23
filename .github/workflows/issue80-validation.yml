@@ -102,10 +102,24 @@ jobs:
 
       - name: Verify corrected fixture on baseline and stress combined revision
         run: |
+          set -o pipefail
+          (cd baseline && uv run --locked black --check --diff tests/test_hitl_timeout_recovery.py) > "$RUNNER_TEMP/original-fixture-black.log" 2>&1 || true
           cp head/tests/test_hitl_timeout_recovery.py baseline/tests/test_hitl_timeout_recovery.py
           (cd baseline && uv run --locked python -m pytest tests -q --junitxml="$RUNNER_TEMP/fixed-baseline.xml") 2>&1 | tee "$RUNNER_TEMP/fixed-baseline.log"
           (cd head && uv run --locked python -m pytest tests/test_hitl_timeout_recovery.py -q) 2>&1 | tee "$RUNNER_TEMP/recovery.log"
-          (cd head && uv run --locked ruff check tests/test_hitl_timeout_recovery.py && uv run --locked black --check tests/test_hitl_timeout_recovery.py) 2>&1 | tee "$RUNNER_TEMP/fixture-style.log"
+          (cd head && uv run --locked ruff check tests/test_hitl_timeout_recovery.py) 2>&1 | tee "$RUNNER_TEMP/fixture-ruff.log"
+          (cd head && uv run --locked black --check --diff tests/test_hitl_timeout_recovery.py) > "$RUNNER_TEMP/corrected-fixture-black.log" 2>&1 || true
+          # This existing test file has unrelated formatting debt. Record both
+          # exact diffs; the one-field fixture repair must add no formatting debt.
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          root = Path(os.environ['RUNNER_TEMP'])
+          def hunks(name):
+              return [line for line in (root / name).read_text().splitlines()
+                      if line.startswith(('+', '-')) and not line.startswith(('+++', '---'))]
+          assert hunks('original-fixture-black.log') == hunks('corrected-fixture-black.log')
+          PY
           cd head
           for round in $(seq 1 10); do
             uv run --locked python -m pytest tests/test_submission_identity.py::test_eight_simultaneous_same_title_submissions_remain_complete tests/test_submission_identity.py::test_concurrent_forced_collision_has_one_winner_and_preserves_its_data -q --junitxml="$RUNNER_TEMP/stress-$round.xml" 2>&1 | tee "$RUNNER_TEMP/stress-$round.log"
