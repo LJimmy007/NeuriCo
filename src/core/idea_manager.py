@@ -120,7 +120,7 @@ class IdeaManager:
         # a partial record. A successful submission owns its ID permanently,
         # including after its YAML moves to another status directory.
         yaml_text = yaml.dump(idea_spec, default_flow_style=False, sort_keys=False)
-        host_paths = collect_host_paths(idea_spec.get('idea', {}))
+        host_paths = collect_host_paths(idea_spec.get("idea", {}))
         idea_path = self.submitted_dir / f"{idea_id}.yaml"
         mounts_dir = self.ideas_dir / "mounts"
         mounts_path = mounts_dir / f"{idea_id}.txt"
@@ -133,13 +133,15 @@ class IdeaManager:
             # Exclusive creation arbitrates between processes on both Windows
             # and POSIX. Keep this empty marker after success; a transient lock
             # would allow an ID to be reissued after its YAML has moved.
-            with open(reservation_path, 'x', encoding='utf-8'):
+            with open(reservation_path, "x", encoding="utf-8"):
                 created_paths.append(reservation_path)
 
             # Older records predate reservations. A sidecar alone also occupies
             # the ID, even when this new submission has no local resources.
-            existing_paths = [directory / f"{idea_id}.yaml" for directory in
-                              (self.submitted_dir, self.in_progress_dir, self.completed_dir)]
+            existing_paths = [
+                directory / f"{idea_id}.yaml"
+                for directory in (self.submitted_dir, self.in_progress_dir, self.completed_dir)
+            ]
             if any(os.path.lexists(path) for path in [*existing_paths, mounts_path]):
                 raise FileExistsError(f"Idea ID already exists: {idea_id}")
 
@@ -152,7 +154,7 @@ class IdeaManager:
                 artifacts.append((mounts_path, "\n".join(host_paths) + "\n"))
             artifacts.append((idea_path, yaml_text))
             for path, content in artifacts:
-                with open(path, 'x', encoding='utf-8') as f:
+                with open(path, "x", encoding="utf-8") as f:
                     created_paths.append(path)
                     f.write(content)
         except BaseException:
@@ -440,13 +442,12 @@ class IdeaManager:
             Unique idea ID string
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        title = idea_spec.get('idea', {}).get('title', 'untitled')
+        title = idea_spec.get("idea", {}).get("title", "untitled")
 
         # Sanitize title for use in ID
         safe_title = title.lower()
-        safe_title = ''.join(c if c.isalnum() or c.isspace() else '_'
-                            for c in safe_title)
-        safe_title = '_'.join(safe_title.split())[:30]  # Max 30 chars
+        safe_title = "".join(c if c.isalnum() or c.isspace() else "_" for c in safe_title)
+        safe_title = "_".join(safe_title.split())[:30]  # Max 30 chars
 
         idea_id = f"{safe_title}_{timestamp}_{uuid4().hex}"
 

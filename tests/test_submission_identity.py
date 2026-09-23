@@ -61,7 +61,9 @@ def test_same_title_in_same_second_keeps_every_new_submission(tmp_path, monkeypa
         assert (tmp_path / "mounts" / f"{idea_id}.txt").read_text().splitlines() == [resource]
 
 
-def test_resource_free_submission_does_not_inherit_previous_same_title_mounts(tmp_path, monkeypatch):
+def test_resource_free_submission_does_not_inherit_previous_same_title_mounts(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(idea_manager, "datetime", FrozenDateTime)
     manager = IdeaManager(tmp_path)
     resource = tmp_path / "first.csv"
@@ -99,8 +101,10 @@ def _concurrent_submissions(tmp_path, forced_id=None):
     context = multiprocessing.get_context("spawn")
     barrier = context.Barrier(8)
     results = context.Queue()
-    workers = [context.Process(target=_submit_worker, args=(str(tmp_path), barrier, results, i, forced_id))
-               for i in range(8)]
+    workers = [
+        context.Process(target=_submit_worker, args=(str(tmp_path), barrier, results, i, forced_id))
+        for i in range(8)
+    ]
     try:
         for worker in workers:
             worker.start()
@@ -137,8 +141,12 @@ def test_eight_simultaneous_same_title_submissions_remain_complete(tmp_path):
 
 
 @pytest.mark.parametrize("location", ["submitted", "in_progress", "completed", "mounts"])
-@pytest.mark.parametrize("with_resource", [False, True], ids=["no-resource-newcomer", "resource-newcomer"])
-def test_collision_preserves_existing_record_and_mounts(tmp_path, monkeypatch, location, with_resource):
+@pytest.mark.parametrize(
+    "with_resource", [False, True], ids=["no-resource-newcomer", "resource-newcomer"]
+)
+def test_collision_preserves_existing_record_and_mounts(
+    tmp_path, monkeypatch, location, with_resource
+):
     manager = IdeaManager(tmp_path)
     idea_id = "legacy_title_20260102_030405_1234abcd"
     directory = tmp_path / location
@@ -154,8 +162,11 @@ def test_collision_preserves_existing_record_and_mounts(tmp_path, monkeypatch, l
         manager.submit_idea(spec, validate=False)
 
     assert existing_path.read_bytes() == existing_bytes
-    visible = [p for status in ("submitted", "in_progress", "completed", "mounts")
-               for p in (tmp_path / status).glob("*")]
+    visible = [
+        p
+        for status in ("submitted", "in_progress", "completed", "mounts")
+        for p in (tmp_path / status).glob("*")
+    ]
     assert visible == [existing_path]
 
 
@@ -177,7 +188,9 @@ def test_legacy_id_can_be_loaded_listed_moved_and_reopened(tmp_path):
     manager = IdeaManager(tmp_path)
     idea_id = "same_research_title_20260102_030405_1234abcd"
     spec = _spec("legacy")
-    spec["idea"]["metadata"].update(idea_id=idea_id, status="submitted", github_repo_name="original-repo")
+    spec["idea"]["metadata"].update(
+        idea_id=idea_id, status="submitted", github_repo_name="original-repo"
+    )
     (tmp_path / "submitted" / f"{idea_id}.yaml").write_text(yaml.safe_dump(spec), encoding="utf-8")
 
     assert manager.get_idea(idea_id) == spec
@@ -242,8 +255,12 @@ def _patch_file_opens(monkeypatch, intercept):
         monkeypatch.setattr(module, "open", redirected)
 
 
-@pytest.mark.parametrize("failure", ["serialization", "yaml-write", "mount-write", "yaml-close", "mount-close"])
-def test_failed_submission_removes_partial_files_and_preserves_other_ideas(tmp_path, monkeypatch, capsys, failure):
+@pytest.mark.parametrize(
+    "failure", ["serialization", "yaml-write", "mount-write", "yaml-close", "mount-close"]
+)
+def test_failed_submission_removes_partial_files_and_preserves_other_ideas(
+    tmp_path, monkeypatch, capsys, failure
+):
     manager = IdeaManager(tmp_path)
     prior_id = manager.submit_idea(_spec("prior", tmp_path / "prior.csv"), validate=False)
     prior_yaml = manager.get_idea_path(prior_id).read_bytes()
@@ -253,18 +270,31 @@ def test_failed_submission_removes_partial_files_and_preserves_other_ideas(tmp_p
 
     with monkeypatch.context() as fault:
         if failure == "serialization":
+
             def fail_dump(*args, **kwargs):
                 raise yaml.YAMLError("injected serialization failure")
+
             fault.setattr(yaml, "dump", fail_dump)
             expected_error = yaml.YAMLError
         else:
-            failed_path = (tmp_path / "submitted" / "failed-new-id.yaml" if failure.startswith("yaml-")
-                           else tmp_path / "mounts" / "failed-new-id.txt")
+            failed_path = (
+                tmp_path / "submitted" / "failed-new-id.yaml"
+                if failure.startswith("yaml-")
+                else tmp_path / "mounts" / "failed-new-id.txt"
+            )
 
             def failing_open(original, file, mode, *args, **kwargs):
                 stream = original(file, mode, *args, **kwargs)
-                if not isinstance(file, int) and Path(file) == failed_path and any(c in mode for c in "wax"):
-                    return _CloseFailure(stream) if failure.endswith("close") else _PartialWriteFailure(stream)
+                if (
+                    not isinstance(file, int)
+                    and Path(file) == failed_path
+                    and any(c in mode for c in "wax")
+                ):
+                    return (
+                        _CloseFailure(stream)
+                        if failure.endswith("close")
+                        else _PartialWriteFailure(stream)
+                    )
                 return stream
 
             _patch_file_opens(fault, failing_open)
@@ -285,22 +315,33 @@ def test_failed_submission_removes_partial_files_and_preserves_other_ideas(tmp_p
     retry_id = manager.submit_idea(_spec("retry", tmp_path / "retry.csv"), validate=False)
     assert retry_id == "failed-new-id"
     assert manager.get_idea(retry_id)["idea"]["metadata"]["source"] == "retry"
-    assert (tmp_path / "mounts" / f"{retry_id}.txt").read_text().splitlines() == [str(tmp_path / "retry.csv")]
+    assert (tmp_path / "mounts" / f"{retry_id}.txt").read_text().splitlines() == [
+        str(tmp_path / "retry.csv")
+    ]
 
 
 @pytest.mark.parametrize("artifact", ["yaml", "mounts"])
-def test_artifact_created_after_occupancy_check_is_never_overwritten_or_cleaned(tmp_path, monkeypatch, artifact):
+def test_artifact_created_after_occupancy_check_is_never_overwritten_or_cleaned(
+    tmp_path, monkeypatch, artifact
+):
     manager = IdeaManager(tmp_path)
     monkeypatch.setattr(manager, "_generate_idea_id", lambda spec: "racing-id")
-    target = (tmp_path / "submitted" / "racing-id.yaml" if artifact == "yaml"
-              else tmp_path / "mounts" / "racing-id.txt")
+    target = (
+        tmp_path / "submitted" / "racing-id.yaml"
+        if artifact == "yaml"
+        else tmp_path / "mounts" / "racing-id.txt"
+    )
     foreign = "Created by another writer after preflight\n"
     injected = False
 
     def competing_open(original, file, mode, *args, **kwargs):
         nonlocal injected
-        if (not injected and not isinstance(file, int) and Path(file) == target
-                and any(c in mode for c in "wax")):
+        if (
+            not injected
+            and not isinstance(file, int)
+            and Path(file) == target
+            and any(c in mode for c in "wax")
+        ):
             injected = True
             with original(file, "w", encoding="utf-8") as stream:
                 stream.write(foreign)
