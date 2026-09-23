@@ -100,6 +100,17 @@ jobs:
           tail -n 35 "$RUNNER_TEMP/head-pytest.log"
           echo "Changed revision pytest exit code: $result"
 
+      - name: Verify corrected fixture on baseline and stress combined revision
+        run: |
+          cp head/tests/test_hitl_timeout_recovery.py baseline/tests/test_hitl_timeout_recovery.py
+          (cd baseline && uv run --locked python -m pytest tests -q --junitxml="$RUNNER_TEMP/fixed-baseline.xml") 2>&1 | tee "$RUNNER_TEMP/fixed-baseline.log"
+          (cd head && uv run --locked python -m pytest tests/test_hitl_timeout_recovery.py -q) 2>&1 | tee "$RUNNER_TEMP/recovery.log"
+          (cd head && uv run --locked ruff check tests/test_hitl_timeout_recovery.py && uv run --locked black --check tests/test_hitl_timeout_recovery.py) 2>&1 | tee "$RUNNER_TEMP/fixture-style.log"
+          cd head
+          for round in $(seq 1 10); do
+            uv run --locked python -m pytest tests/test_submission_identity.py::test_eight_simultaneous_same_title_submissions_remain_complete tests/test_submission_identity.py::test_concurrent_forced_collision_has_one_winner_and_preserves_its_data -q --junitxml="$RUNNER_TEMP/stress-$round.xml" 2>&1 | tee "$RUNNER_TEMP/stress-$round.log"
+          done
+
       - name: Compare baseline and changed lint on the same scope
         id: lint
         run: |
@@ -274,6 +285,15 @@ jobs:
 
           base_bad, _, base_count = junit('baseline.xml')
           head_bad, _, head_count = junit('head.xml')
+          fixed_base_bad, _, fixed_base_count = junit('fixed-baseline.xml')
+          if fixed_base_bad or fixed_base_count != 305:
+              issues.append('Corrected baseline full suite did not pass all 305 tests')
+          if head_bad or head_count != 328 or os.getenv('HEAD_EXIT') != '0':
+              issues.append('Combined PR and corrected fixture did not pass all 328 tests')
+          for round in range(1, 11):
+              stress_bad, _, stress_count = junit(f'stress-{round}.xml')
+              if stress_bad or stress_count != 2:
+                  issues.append(f'Concurrent stress round {round} failed')
           red_bad, red_failures, red_count = junit('baseline-red.xml')
           green_bad, _, green_count = junit('head-new-tests.xml')
           new_failures = sorted(head_bad - base_bad)
@@ -319,6 +339,8 @@ jobs:
               'head_pytest_exit': os.getenv('HEAD_EXIT'),
               'baseline_cases': base_count,
               'head_cases': head_count,
+              'fixed_baseline_cases': fixed_base_count,
+              'fixed_baseline_failed_cases': sorted(fixed_base_bad),
               'baseline_failed_cases': sorted(base_bad),
               'head_failed_cases': sorted(head_bad),
               'new_failed_cases': new_failures,
