@@ -2,6 +2,7 @@
 
 import copy
 import builtins
+from contextlib import redirect_stdout
 from datetime import datetime
 import io
 import multiprocessing
@@ -60,18 +61,38 @@ def test_same_title_in_same_second_keeps_every_new_submission(tmp_path, monkeypa
         assert (tmp_path / "mounts" / f"{idea_id}.txt").read_text().splitlines() == [resource]
 
 
+def test_resource_free_submission_does_not_inherit_previous_same_title_mounts(tmp_path, monkeypatch):
+    monkeypatch.setattr(idea_manager, "datetime", FrozenDateTime)
+    manager = IdeaManager(tmp_path)
+    resource = tmp_path / "first.csv"
+    first_id = manager.submit_idea(_spec("with-resource", resource), validate=False)
+    second_id = manager.submit_idea(_spec("without-resource"), validate=False)
+
+    assert first_id != second_id
+    first = manager.get_idea(first_id)["idea"]
+    second = manager.get_idea(second_id)["idea"]
+    assert first["metadata"]["source"] == "with-resource"
+    assert first["local_resources"]["datasets"][0]["path"] == str(resource)
+    assert second["metadata"]["source"] == "without-resource"
+    assert "local_resources" not in second
+    assert (tmp_path / "mounts" / f"{first_id}.txt").read_text().splitlines() == [str(resource)]
+    assert not (tmp_path / "mounts" / f"{second_id}.txt").exists()
+    assert {row["idea_id"] for row in manager.list_ideas()} == {first_id, second_id}
+
+
 def _submit_worker(root, barrier, results, index, forced_id):
     """Top-level worker is importable under Windows' real spawn start method."""
-    idea_manager.datetime = FrozenDateTime
-    manager = IdeaManager(Path(root))
-    if forced_id:
-        manager._generate_idea_id = lambda spec: forced_id
-    spec = _spec(str(index), Path(root) / f"resource-{index}.csv")
-    try:
-        barrier.wait(timeout=30)
-        results.put((index, "ok", manager.submit_idea(spec, validate=False)))
-    except Exception as error:
-        results.put((index, type(error).__name__, str(error)))
+    with redirect_stdout(io.StringIO()):
+        try:
+            idea_manager.datetime = FrozenDateTime
+            manager = IdeaManager(Path(root))
+            if forced_id:
+                manager._generate_idea_id = lambda spec: forced_id
+            spec = _spec(str(index), Path(root) / f"resource-{index}.csv")
+            barrier.wait(timeout=30)
+            results.put((index, "ok", manager.submit_idea(spec, validate=False)))
+        except Exception as error:
+            results.put((index, type(error).__name__, str(error)))
 
 
 def _concurrent_submissions(tmp_path, forced_id=None):
@@ -222,39 +243,49 @@ def _patch_file_opens(monkeypatch, intercept):
 
 
 @pytest.mark.parametrize("failure", ["serialization", "yaml-write", "mount-write", "yaml-close", "mount-close"])
-def test_failed_submission_removes_partial_files_and_preserves_other_ideas(tmp_path, monkeypatch, failure):
+def test_failed_submission_removes_partial_files_and_preserves_other_ideas(tmp_path, monkeypatch, capsys, failure):
     manager = IdeaManager(tmp_path)
     prior_id = manager.submit_idea(_spec("prior", tmp_path / "prior.csv"), validate=False)
     prior_yaml = manager.get_idea_path(prior_id).read_bytes()
     prior_mounts = (tmp_path / "mounts" / f"{prior_id}.txt").read_bytes()
     monkeypatch.setattr(manager, "_generate_idea_id", lambda spec: "failed-new-id")
+    capsys.readouterr()
 
-    if failure == "serialization":
-        def fail_dump(*args, **kwargs):
-            raise yaml.YAMLError("injected serialization failure")
-        monkeypatch.setattr(yaml, "dump", fail_dump)
-        expected_error = yaml.YAMLError
-    else:
-        failed_path = (tmp_path / "submitted" / "failed-new-id.yaml" if failure.startswith("yaml-")
-                       else tmp_path / "mounts" / "failed-new-id.txt")
+    with monkeypatch.context() as fault:
+        if failure == "serialization":
+            def fail_dump(*args, **kwargs):
+                raise yaml.YAMLError("injected serialization failure")
+            fault.setattr(yaml, "dump", fail_dump)
+            expected_error = yaml.YAMLError
+        else:
+            failed_path = (tmp_path / "submitted" / "failed-new-id.yaml" if failure.startswith("yaml-")
+                           else tmp_path / "mounts" / "failed-new-id.txt")
 
-        def failing_open(original, file, mode, *args, **kwargs):
-            stream = original(file, mode, *args, **kwargs)
-            if not isinstance(file, int) and Path(file) == failed_path and any(c in mode for c in "wax"):
-                return _CloseFailure(stream) if failure.endswith("close") else _PartialWriteFailure(stream)
-            return stream
+            def failing_open(original, file, mode, *args, **kwargs):
+                stream = original(file, mode, *args, **kwargs)
+                if not isinstance(file, int) and Path(file) == failed_path and any(c in mode for c in "wax"):
+                    return _CloseFailure(stream) if failure.endswith("close") else _PartialWriteFailure(stream)
+                return stream
 
-        _patch_file_opens(monkeypatch, failing_open)
-        expected_error = OSError
+            _patch_file_opens(fault, failing_open)
+            expected_error = OSError
 
-    with pytest.raises(expected_error):
-        manager.submit_idea(_spec("failed", tmp_path / "failed.csv"), validate=False)
+        with pytest.raises(expected_error):
+            manager.submit_idea(_spec("failed", tmp_path / "failed.csv"), validate=False)
+
+    output = capsys.readouterr()
+    assert "success" not in (output.out + output.err).lower()
 
     assert not (tmp_path / "submitted" / "failed-new-id.yaml").exists()
     assert not (tmp_path / "mounts" / "failed-new-id.txt").exists()
     assert manager.get_idea_path(prior_id).read_bytes() == prior_yaml
     assert (tmp_path / "mounts" / f"{prior_id}.txt").read_bytes() == prior_mounts
     assert [item["idea_id"] for item in manager.list_ideas()] == [prior_id]
+
+    retry_id = manager.submit_idea(_spec("retry", tmp_path / "retry.csv"), validate=False)
+    assert retry_id == "failed-new-id"
+    assert manager.get_idea(retry_id)["idea"]["metadata"]["source"] == "retry"
+    assert (tmp_path / "mounts" / f"{retry_id}.txt").read_text().splitlines() == [str(tmp_path / "retry.csv")]
 
 
 @pytest.mark.parametrize("artifact", ["yaml", "mounts"])
