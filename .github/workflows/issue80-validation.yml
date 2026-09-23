@@ -21,6 +21,11 @@ jobs:
       GITHUB_TOKEN: ''
       OPENAI_API_KEY: ''
       S2_API_KEY: ''
+      # The existing private-state restore tests create local Git commits.
+      GIT_AUTHOR_NAME: NeuriCo validation
+      GIT_AUTHOR_EMAIL: validation@example.invalid
+      GIT_COMMITTER_NAME: NeuriCo validation
+      GIT_COMMITTER_EMAIL: validation@example.invalid
     steps:
       - name: Checkout changed revision
         uses: actions/checkout@v4
