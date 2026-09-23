@@ -1,0 +1,354 @@
+name: Issue 80 isolated Linux validation
+
+# Copy this file and cli_smoke.py together to .github/workflows/ on the
+# validation/issue80 branch. This workflow is deliberately absent from the PR.
+on:
+  push:
+    branches: [validation/issue80]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BASE_SHA: d71bace2cc77cab404ac205ae5c68ad2fe46f25f
+      UV_PYTHON: '3.12'
+      PYTHONUTF8: '1'
+      GITHUB_TOKEN: ''
+      OPENAI_API_KEY: ''
+      S2_API_KEY: ''
+    steps:
+      - name: Checkout changed revision
+        uses: actions/checkout@v4
+        with:
+          path: head
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout original baseline
+        uses: actions/checkout@v4
+        with:
+          path: baseline
+          ref: d71bace2cc77cab404ac205ae5c68ad2fe46f25f
+          persist-credentials: false
+
+      - name: Install official uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: '0.12.17'
+          enable-cache: true
+          cache-dependency-glob: |
+            head/pyproject.toml
+            head/uv.lock
+            baseline/pyproject.toml
+            baseline/uv.lock
+          cache-suffix: neurico-issue80-linux-py312
+
+      - name: Install Python 3.12
+        run: uv python install 3.12
+
+      - name: Locked clean baseline install
+        working-directory: baseline
+        run: uv sync --locked --python 3.12 2>&1 | tee "$RUNNER_TEMP/baseline-sync.log"
+
+      - name: Locked clean changed install
+        working-directory: head
+        run: uv sync --locked --python 3.12 2>&1 | tee "$RUNNER_TEMP/head-sync.log"
+
+      - name: Record runtime and checked revisions
+        run: |
+          {
+            date -u
+            uname -a
+            uv --version
+            echo "baseline=$(git -C baseline rev-parse HEAD)"
+            echo "head=$(git -C head rev-parse HEAD)"
+            (cd baseline && uv run --locked python --version)
+            (cd head && uv run --locked python --version)
+          } 2>&1 | tee "$RUNNER_TEMP/runtime.log"
+
+      - name: Original baseline full suite
+        id: baseline_suite
+        working-directory: baseline
+        run: |
+          set +e
+          uv run --locked python -m pytest tests -q --junitxml="$RUNNER_TEMP/baseline.xml" > "$RUNNER_TEMP/baseline-pytest.log" 2>&1
+          result=$?
+          set -e
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          tail -n 35 "$RUNNER_TEMP/baseline-pytest.log"
+          echo "Original baseline pytest exit code: $result"
+
+      - name: Changed revision full suite
+        id: head_suite
+        working-directory: head
+        run: |
+          set +e
+          uv run --locked python -m pytest tests -q --junitxml="$RUNNER_TEMP/head.xml" > "$RUNNER_TEMP/head-pytest.log" 2>&1
+          result=$?
+          set -e
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          tail -n 35 "$RUNNER_TEMP/head-pytest.log"
+          echo "Changed revision pytest exit code: $result"
+
+      - name: Compare baseline and changed lint on the same scope
+        id: lint
+        run: |
+          set +e
+          (cd baseline && uv run --locked ruff check src tests --output-format json) > "$RUNNER_TEMP/baseline-ruff.json" 2> "$RUNNER_TEMP/baseline-ruff.log"
+          base_result=$?
+          (cd head && uv run --locked ruff check src tests --output-format json) > "$RUNNER_TEMP/head-ruff.json" 2> "$RUNNER_TEMP/head-ruff.log"
+          head_result=$?
+          set -e
+          echo "baseline_exit_code=$base_result" >> "$GITHUB_OUTPUT"
+          echo "head_exit_code=$head_result" >> "$GITHUB_OUTPUT"
+          echo "Ruff exit codes: baseline=$base_result changed=$head_result"
+
+      - name: Record baseline and changed core formatting
+        id: core_black
+        run: |
+          set +e
+          (cd baseline && uv run --locked black --check --diff src/core/idea_manager.py) > "$RUNNER_TEMP/baseline-core-black.log" 2>&1
+          base_result=$?
+          (cd head && uv run --locked black --check --diff src/core/idea_manager.py) > "$RUNNER_TEMP/head-core-black.log" 2>&1
+          head_result=$?
+          set -e
+          echo "baseline_exit_code=$base_result" >> "$GITHUB_OUTPUT"
+          echo "head_exit_code=$head_result" >> "$GITHUB_OUTPUT"
+          echo "Core Black exit codes: baseline=$base_result changed=$head_result"
+
+      - name: Identify and copy only new regression tests for baseline red proof
+        id: new_tests
+        run: |
+          git -C head diff --diff-filter=A --name-only "$BASE_SHA" HEAD -- tests \
+            | grep -E '^tests/test_.*\.py$' > "$RUNNER_TEMP/new-tests.txt" || true
+          cat "$RUNNER_TEMP/new-tests.txt"
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            mkdir -p "baseline/$(dirname "$path")"
+            cp "head/$path" "baseline/$path"
+          done < "$RUNNER_TEMP/new-tests.txt"
+
+      - name: New tests fail against original implementation
+        id: red_proof
+        working-directory: baseline
+        run: |
+          mapfile -t tests < "$RUNNER_TEMP/new-tests.txt"
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo 'No added test files were found' > "$RUNNER_TEMP/baseline-red.log"
+            echo 'exit_code=missing' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set +e
+          uv run --locked python -m pytest "${tests[@]}" -q --junitxml="$RUNNER_TEMP/baseline-red.xml" > "$RUNNER_TEMP/baseline-red.log" 2>&1
+          result=$?
+          set -e
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          tail -n 35 "$RUNNER_TEMP/baseline-red.log"
+          echo "Added tests on baseline exit code (expected nonzero): $result"
+
+      - name: New tests pass against changed implementation
+        id: green_proof
+        working-directory: head
+        run: |
+          mapfile -t tests < "$RUNNER_TEMP/new-tests.txt"
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo 'No added test files were found' > "$RUNNER_TEMP/head-new-tests.log"
+            echo 'exit_code=missing' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set +e
+          uv run --locked python -m pytest "${tests[@]}" -q --junitxml="$RUNNER_TEMP/head-new-tests.xml" > "$RUNNER_TEMP/head-new-tests.log" 2>&1
+          result=$?
+          set -e
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          tail -n 35 "$RUNNER_TEMP/head-new-tests.log"
+          echo "Added tests on changed revision exit code: $result"
+
+      - name: New test files satisfy Black
+        id: new_black
+        working-directory: head
+        run: |
+          mapfile -t tests < "$RUNNER_TEMP/new-tests.txt"
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo 'No added test files were found' > "$RUNNER_TEMP/head-new-black.log"
+            echo 'exit_code=missing' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set +e
+          uv run --locked black --check "${tests[@]}" > "$RUNNER_TEMP/head-new-black.log" 2>&1
+          result=$?
+          set -e
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/head-new-black.log"
+
+      - name: Real CLI local submission smoke
+        id: cli_smoke
+        working-directory: head
+        run: |
+          set +e
+          uv run --locked python .github/workflows/cli_smoke.py --repo "$PWD" --output-dir "$RUNNER_TEMP/cli-smoke" > "$RUNNER_TEMP/cli-smoke.log" 2>&1
+          result=$?
+          set -e
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/cli-smoke.log"
+
+      - name: Lightweight container check of the actual entrypoint
+        id: entrypoint
+        run: |
+          # This uses Python 3.12 slim and official uv with locked project
+          # runtime dependencies. It does not build the production CUDA image.
+          set +e
+          {
+            docker build -t neurico-entrypoint-check -f - "$RUNNER_TEMP" <<'DOCKERFILE'
+          FROM ghcr.io/astral-sh/uv:0.12.17 AS uv
+          FROM python:3.12-slim
+          COPY --from=uv /uv /usr/local/bin/uv
+          RUN apt-get update && apt-get install -y --no-install-recommends bash git ca-certificates \
+              && rm -rf /var/lib/apt/lists/*
+          WORKDIR /app
+          DOCKERFILE
+            uv_cache=$(uv cache dir)
+            mkdir -p "$RUNNER_TEMP/container-smoke"
+            docker run --rm \
+              --mount "type=bind,src=$GITHUB_WORKSPACE/head,dst=/app,readonly" \
+              --mount "type=bind,src=$uv_cache,dst=/root/.cache/uv" \
+              --mount "type=bind,src=$RUNNER_TEMP/container-smoke,dst=/acceptance" \
+              -e UV_PROJECT_ENVIRONMENT=/tmp/neurico-venv \
+              -e PYTHONPATH=/app/src \
+              -e GITHUB_TOKEN= -e OPENAI_API_KEY= -e S2_API_KEY= \
+              --entrypoint /bin/bash neurico-entrypoint-check -lc \
+              'cd /app && uv sync --locked --no-dev --python /usr/local/bin/python && exec /bin/bash /app/docker/entrypoint.sh /tmp/neurico-venv/bin/python -X utf8 /app/.github/workflows/cli_smoke.py --repo /app --output-dir /acceptance'
+          } > "$RUNNER_TEMP/entrypoint.log" 2>&1
+          result=$?
+          set -e
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          tail -n 45 "$RUNNER_TEMP/entrypoint.log"
+
+      - name: Compare results and enforce acceptance
+        if: always()
+        env:
+          BASELINE_EXIT: ${{ steps.baseline_suite.outputs.exit_code }}
+          HEAD_EXIT: ${{ steps.head_suite.outputs.exit_code }}
+          BASELINE_RUFF_EXIT: ${{ steps.lint.outputs.baseline_exit_code }}
+          HEAD_RUFF_EXIT: ${{ steps.lint.outputs.head_exit_code }}
+          BASELINE_CORE_BLACK_EXIT: ${{ steps.core_black.outputs.baseline_exit_code }}
+          HEAD_CORE_BLACK_EXIT: ${{ steps.core_black.outputs.head_exit_code }}
+          RED_EXIT: ${{ steps.red_proof.outputs.exit_code }}
+          GREEN_EXIT: ${{ steps.green_proof.outputs.exit_code }}
+          NEW_BLACK_EXIT: ${{ steps.new_black.outputs.exit_code }}
+          CLI_EXIT: ${{ steps.cli_smoke.outputs.exit_code }}
+          ENTRYPOINT_EXIT: ${{ steps.entrypoint.outputs.exit_code }}
+        run: |
+          python - <<'PY'
+          from collections import Counter
+          import json
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          issues = []
+
+          def junit(name):
+              path = root / name
+              if not path.exists():
+                  issues.append(f'Missing JUnit report: {name}')
+                  return set(), 0, 0
+              cases = list(ET.parse(path).getroot().iter('testcase'))
+              bad = {f"{c.get('classname')}::{c.get('name')}" for c in cases
+                     if c.find('failure') is not None or c.find('error') is not None}
+              failures = sum(c.find('failure') is not None for c in cases)
+              if not cases:
+                  issues.append(f'JUnit report has no tests: {name}')
+              return bad, failures, len(cases)
+
+          base_bad, _, base_count = junit('baseline.xml')
+          head_bad, _, head_count = junit('head.xml')
+          red_bad, red_failures, red_count = junit('baseline-red.xml')
+          green_bad, _, green_count = junit('head-new-tests.xml')
+          new_failures = sorted(head_bad - base_bad)
+          if new_failures:
+              issues.append(f'New failing full-suite cases: {new_failures}')
+          if os.getenv('GREEN_EXIT') != '0' or green_bad:
+              issues.append('Added regression tests did not pass on the changed revision')
+          if os.getenv('NEW_BLACK_EXIT') != '0':
+              issues.append('Added regression test files failed Black')
+          if os.getenv('RED_EXIT') in ('', '0', 'missing') or red_failures == 0:
+              issues.append('Added regression tests did not show a real assertion failure on baseline')
+          if os.getenv('CLI_EXIT') != '0':
+              issues.append('Real CLI submission smoke failed')
+          if os.getenv('ENTRYPOINT_EXIT') != '0':
+              issues.append('Lightweight container entrypoint check failed')
+
+          def ruff(name):
+              path = root / name
+              try:
+                  diagnostics = json.loads(path.read_text())
+              except (OSError, json.JSONDecodeError) as error:
+                  issues.append(f'Cannot read Ruff JSON {name}: {error}')
+                  return Counter()
+              checkout = Path(os.environ['GITHUB_WORKSPACE']) / (
+                  'baseline' if name.startswith('baseline') else 'head')
+              return Counter((Path(d['filename']).resolve().relative_to(checkout).as_posix(),
+                              d['code'], d['message']) for d in diagnostics)
+
+          base_lint = ruff('baseline-ruff.json')
+          head_lint = ruff('head-ruff.json')
+          new_lint = sorted((*key, count) for key, count in (head_lint - base_lint).items())
+          if new_lint:
+              issues.append(f'New Ruff diagnostics: {new_lint[:20]}')
+          if os.getenv('BASELINE_EXIT') == '' or os.getenv('HEAD_EXIT') == '':
+              issues.append('Missing full-suite exit code')
+          if os.getenv('BASELINE_RUFF_EXIT') == '' or os.getenv('HEAD_RUFF_EXIT') == '':
+              issues.append('Missing Ruff exit code')
+          if os.getenv('BASELINE_CORE_BLACK_EXIT') == '0' and os.getenv('HEAD_CORE_BLACK_EXIT') != '0':
+              issues.append('Core file became unformatted under Black')
+
+          report = {
+              'baseline_pytest_exit': os.getenv('BASELINE_EXIT'),
+              'head_pytest_exit': os.getenv('HEAD_EXIT'),
+              'baseline_cases': base_count,
+              'head_cases': head_count,
+              'baseline_failed_cases': sorted(base_bad),
+              'head_failed_cases': sorted(head_bad),
+              'new_failed_cases': new_failures,
+              'red_exit': os.getenv('RED_EXIT'),
+              'red_cases': red_count,
+              'red_assertion_failures': red_failures,
+              'green_exit': os.getenv('GREEN_EXIT'),
+              'green_cases': green_count,
+              'new_tests_black_exit': os.getenv('NEW_BLACK_EXIT'),
+              'cli_exit': os.getenv('CLI_EXIT'),
+              'entrypoint_exit': os.getenv('ENTRYPOINT_EXIT'),
+              'baseline_ruff_exit': os.getenv('BASELINE_RUFF_EXIT'),
+              'head_ruff_exit': os.getenv('HEAD_RUFF_EXIT'),
+              'baseline_core_black_exit': os.getenv('BASELINE_CORE_BLACK_EXIT'),
+              'head_core_black_exit': os.getenv('HEAD_CORE_BLACK_EXIT'),
+              'new_ruff_diagnostics': new_lint,
+              'acceptance_issues': issues,
+          }
+          (root / 'comparison.json').write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, indent=2))
+          if issues:
+              raise SystemExit(1)
+          PY
+
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue80-linux-acceptance
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/*.xml
+            ${{ runner.temp }}/*-ruff.json
+            ${{ runner.temp }}/new-tests.txt
+            ${{ runner.temp }}/comparison.json
+            ${{ runner.temp }}/cli-smoke/**
+            ${{ runner.temp }}/container-smoke/**
+          if-no-files-found: warn
